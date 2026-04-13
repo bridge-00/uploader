@@ -4,15 +4,15 @@ on:
   workflow_dispatch:
     inputs:
       torrent_link:
-        description: 'Magnet link or direct .torrent URL'
+        description: "Magnet link or direct .torrent URL"
         required: true
         type: string
       viking_user_hash:
-        description: 'Your VikingFile user hash (leave empty for anonymous)'
+        description: "Your VikingFile user hash (leave empty for anonymous)"
         required: false
         type: string
       viking_folder:
-        description: 'Folder on VikingFile (optional)'
+        description: "Folder on VikingFile (optional)"
         required: false
         type: string
 
@@ -31,75 +31,79 @@ jobs:
           Move-Item -Path "aria2-1.37.0-win-64bit-build1" -Destination "aria2" -Force
           Write-Host "aria2 installed [OK]"
 
-      - name: 2. Download and Patch VikingFile uploader (urllib fix)
+      - name: 2. Ensure Python is available
+        shell: pwsh
+        run: |
+          python --version
+
+      - name: 3. Download and Patch VikingFile uploader
         shell: pwsh
         run: |
           Invoke-WebRequest -Uri "https://raw.githubusercontent.com/Hexdare/VikingFile-Upload/main/upload.py" -OutFile "upload.py"
           
-          # === CORRECT PATCH for urllib (this is what VikingFile script actually uses) ===
           $content = Get-Content "upload.py" -Raw
-          $patch = @'
-# === GLOBAL USER-AGENT PATCH (bypasses GitHub IP block) ===
-import urllib.request
-opener = urllib.request.build_opener()
-opener.addheaders = [('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')]
-urllib.request.install_opener(opener)
-'@
+
+          $patch = "# === GLOBAL USER-AGENT PATCH ===`n" +
+                   "import urllib.request`n" +
+                   "opener = urllib.request.build_opener()`n" +
+                   "opener.addheaders = [('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')]`n" +
+                   "urllib.request.install_opener(opener)`n"
+
           $content = $patch + "`n`n" + $content
           $content | Set-Content "upload.py" -Encoding utf8
-          Write-Host "VikingFile uploader patched with real browser User-Agent [OK]"
-          Write-Host "(Patch added at the very top of the script)"
 
-      - name: 3. Create downloads folder
+          Write-Host "Uploader patched [OK]"
+
+      - name: 4. Create downloads folder
         shell: pwsh
         run: |
           New-Item -Path "downloads" -ItemType Directory -Force | Out-Null
-          Write-Host "Downloads folder created [OK]"
+          Write-Host "Downloads folder ready [OK]"
 
-      - name: 4. Download torrent with aria2
+      - name: 5. Download torrent with aria2
         shell: pwsh
         run: |
           $link = "${{ github.event.inputs.torrent_link }}"
-          Write-Host "=== STARTING TORRENT DOWNLOAD ==="
-          Write-Host "Link length: $($link.Length) characters"
           
-          $ariaArgs = @(
-              "--dir=downloads",
-              "--seed-time=0",
-              "--max-upload-limit=0",
-              "--enable-dht=true",
-              "--bt-enable-lpd=true",
-              "--allow-overwrite=true",
-              "--file-allocation=none",
-              "--console-log-level=notice",
-              "--max-connection-per-server=16",
-              "--split=16",
-              "--min-split-size=10M",
-              $link
-          )
+          Write-Host "=== START DOWNLOAD ==="
           
-          & .\aria2\aria2c.exe @ariaArgs
-          Write-Host "=== TORRENT DOWNLOAD FINISHED ==="
+          & .\aria2\aria2c.exe `
+            --dir=downloads `
+            --seed-time=0 `
+            --max-upload-limit=0 `
+            --enable-dht=true `
+            --bt-enable-lpd=true `
+            --allow-overwrite=true `
+            --file-allocation=none `
+            --console-log-level=notice `
+            --max-connection-per-server=16 `
+            --split=16 `
+            --min-split-size=10M `
+            $link
 
-      - name: 5. Upload all files to VikingFile.com
+          Write-Host "=== DOWNLOAD COMPLETE ==="
+
+      - name: 6. Upload files to VikingFile
         shell: pwsh
         run: |
           $userHash = "${{ github.event.inputs.viking_user_hash }}"
           $folder   = "${{ github.event.inputs.viking_folder }}"
-          
-          Write-Host "=== UPLOADING TO VIKINGFILE ==="
-          
-          Get-ChildItem -Path "downloads" -Recurse -File | 
-            Where-Object { $_.Extension -ne '.aria2' } | 
+
+          Write-Host "=== START UPLOAD ==="
+
+          Get-ChildItem "downloads" -Recurse -File |
+            Where-Object { $_.Extension -ne ".aria2" } |
             ForEach-Object {
               $file = $_.FullName
-              Write-Host "`nUploading: $($_.Name) ($( [math]::Round($_.Length/1MB,2) ) MB)"
-              
-              $argsList = @($file)
-              if ($userHash) { $argsList += $userHash }
-              if ($folder)   { $argsList += $folder }
-              
-              python upload.py @argsList
+              $size = [math]::Round($_.Length / 1MB, 2)
+
+              Write-Host "`nUploading: $($_.Name) ($size MB)"
+
+              $args = @($file)
+              if ($userHash) { $args += $userHash }
+              if ($folder)   { $args += $folder }
+
+              python upload.py @args
             }
-          
-          Write-Host "`n=== ALL DONE! Check the links above ==="
+
+          Write-Host "`n=== ALL DONE ==="
