@@ -36,14 +36,21 @@ jobs:
         run: |
           python --version
 
-      - name: 3. Download and Patch VikingFile uploader
+      - name: 3. Force UTF-8 encoding (fix crash)
+        shell: pwsh
+        run: |
+          echo "PYTHONIOENCODING=utf-8" >> $env:GITHUB_ENV
+
+      - name: 4. Download and Patch VikingFile uploader
         shell: pwsh
         run: |
           Invoke-WebRequest -Uri "https://raw.githubusercontent.com/Hexdare/VikingFile-Upload/main/upload.py" -OutFile "upload.py"
           
           $content = Get-Content "upload.py" -Raw
 
-          $patch = "# === GLOBAL USER-AGENT PATCH ===`n" +
+          $patch = "# === GLOBAL PATCH ===`n" +
+                   "import sys`n" +
+                   "sys.stdout.reconfigure(encoding='utf-8')`n" +
                    "import urllib.request`n" +
                    "opener = urllib.request.build_opener()`n" +
                    "opener.addheaders = [('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')]`n" +
@@ -52,15 +59,15 @@ jobs:
           $content = $patch + "`n`n" + $content
           $content | Set-Content "upload.py" -Encoding utf8
 
-          Write-Host "Uploader patched [OK]"
+          Write-Host "Uploader patched + UTF-8 fix applied [OK]"
 
-      - name: 4. Create downloads folder
+      - name: 5. Create downloads folder
         shell: pwsh
         run: |
           New-Item -Path "downloads" -ItemType Directory -Force | Out-Null
           Write-Host "Downloads folder ready [OK]"
 
-      - name: 5. Download torrent with aria2
+      - name: 6. Download torrent with aria2
         shell: pwsh
         run: |
           $link = "${{ github.event.inputs.torrent_link }}"
@@ -83,7 +90,7 @@ jobs:
 
           Write-Host "=== DOWNLOAD COMPLETE ==="
 
-      - name: 6. Upload files to VikingFile
+      - name: 7. Upload files to VikingFile
         shell: pwsh
         run: |
           $userHash = "${{ github.event.inputs.viking_user_hash }}"
@@ -104,6 +111,11 @@ jobs:
               if ($folder)   { $args += $folder }
 
               python upload.py @args
+
+              if ($LASTEXITCODE -ne 0) {
+                Write-Host "Upload failed for $($_.Name)"
+                exit 1
+              }
             }
 
-          Write-Host "`n=== ALL DONE ==="
+          Write-Host "`n=== ALL DONE SUCCESSFULLY ==="
