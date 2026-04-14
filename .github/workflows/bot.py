@@ -5,9 +5,9 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GH_PAT = os.getenv("GH_PAT")
-OWNER = "cursor-00"
+OWNER = "bridge-00"
 REPO = "TORVIKING"
-WORKFLOW = ".github/workflows/main.yml"
+WORKFLOW = "main.yml"
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
