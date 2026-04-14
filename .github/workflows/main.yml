@@ -1,3 +1,5 @@
+name: Torrent to VikingFile Uploader
+
 on:
   workflow_dispatch:
     inputs:
@@ -13,12 +15,136 @@ on:
         description: "Folder on VikingFile (optional)"
         required: false
         type: string
-      telegram_chat_id:          # ← NEW
+      telegram_chat_id:
         description: "Telegram chat ID (auto-filled by bot)"
         required: false
         type: string
 
-# ... steps 1-6 stay 100% the same ...
+jobs:
+  upload:
+    runs-on: windows-latest
+
+    steps:
+      - name: 1. Install aria2
+        shell: pwsh
+        run: |
+          [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+          $ProgressPreference = 'SilentlyContinue'
+          Write-Host "📦 Installing aria2..."
+          $aria2Url = "https://github.com/aria2/aria2/releases/download/release-1.37.0/aria2-1.37.0-win-64bit-build1.zip"
+          Invoke-WebRequest -Uri $aria2Url -OutFile "aria2.zip"
+          Expand-Archive -Path "aria2.zip" -DestinationPath "." -Force
+          Move-Item -Path "aria2-1.37.0-win-64bit-build1" -Destination "aria2" -Force
+          Write-Host "✅ aria2 installed"
+
+      - name: 2. Ensure Python is available
+        shell: pwsh
+        run: |
+          [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+          $ver = python --version 2>&1
+          Write-Host "🐍 $ver"
+
+      - name: 3. Force UTF-8 encoding (fix crash)
+        shell: pwsh
+        run: |
+          echo "PYTHONIOENCODING=utf-8" >> $env:GITHUB_ENV
+
+      - name: 4. Download and Patch VikingFile uploader
+        shell: pwsh
+        run: |
+          [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+          $ProgressPreference = 'SilentlyContinue'
+          Write-Host "🔧 Patching uploader..."
+          Invoke-WebRequest -Uri "https://raw.githubusercontent.com/Hexdare/VikingFile-Upload/main/upload.py" -OutFile "upload.py"
+
+          $content = Get-Content "upload.py" -Raw
+
+          $patch = "# === GLOBAL PATCH ===`n" +
+                   "import sys`n" +
+                   "sys.stdout.reconfigure(encoding='utf-8')`n" +
+                   "import urllib.request`n" +
+                   "opener = urllib.request.build_opener()`n" +
+                   "opener.addheaders = [('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')]`n" +
+                   "urllib.request.install_opener(opener)`n"
+
+          $content = $patch + "`n`n" + $content
+          $content | Set-Content "upload.py" -Encoding utf8
+          Write-Host "✅ Uploader patched"
+
+      - name: 5. Create downloads folder
+        shell: pwsh
+        run: |
+          [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+          New-Item -Path "downloads" -ItemType Directory -Force | Out-Null
+          Write-Host "📂 Downloads folder ready"
+
+      - name: 6. Download torrent with aria2
+        shell: pwsh
+        run: |
+          [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+          $ErrorActionPreference = 'SilentlyContinue'
+          $link = "${{ github.event.inputs.torrent_link }}"
+
+          Write-Host ""
+          Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          Write-Host "  📥 DOWNLOADING TORRENT"
+          Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          Write-Host ""
+
+          $lastPct = -1
+
+          & .\aria2\aria2c.exe `
+            --dir=downloads `
+            --seed-time=0 `
+            --max-upload-limit=0 `
+            --enable-dht=true `
+            --bt-enable-lpd=true `
+            --allow-overwrite=true `
+            --file-allocation=none `
+            --console-log-level=notice `
+            --max-connection-per-server=16 `
+            --split=16 `
+            --min-split-size=10M `
+            --summary-interval=5 `
+            --show-console-readout=false `
+            $link 2>&1 | ForEach-Object {
+              $line = "$_"
+
+              if ($line -match '\[#\w+\s+(\S+)/(\S+)\((\d+)%\).*?DL:(\S+)') {
+                $done  = $Matches[1]
+                $total = $Matches[2]
+                $pct   = [int]$Matches[3]
+                $speed = $Matches[4]
+
+                if ($pct -gt $lastPct) {
+                  $filled = [math]::Floor($pct / 5)
+                  $empty  = 20 - $filled
+                  $bar    = ([char]0x2588).ToString() * $filled + ([char]0x2500).ToString() * $empty
+                  Write-Host "  [$bar] ${pct}% | ${done} / ${total} | ${speed}/s"
+                  $lastPct = $pct
+                }
+              }
+              elseif ($line -match 'Download complete') {
+                Write-Host "  ✅ Download complete!"
+              }
+              elseif ($line -match 'Fetching metadata|Downloading \d+ item') {
+                Write-Host "  ⏳ Fetching metadata..."
+              }
+            }
+
+          $exitCode = $LASTEXITCODE
+          $ErrorActionPreference = 'Stop'
+
+          if ($exitCode -ne 0) {
+            Write-Host "  ❌ Download failed (exit code: $exitCode)"
+            exit 1
+          }
+
+          Write-Host ""
+          $dlFiles = Get-ChildItem "downloads" -Recurse -File | Where-Object { $_.Extension -ne ".aria2" }
+          $totalMB = [math]::Round(($dlFiles | Measure-Object -Property Length -Sum).Sum / 1MB, 2)
+          Write-Host "  📦 Downloaded: $($dlFiles.Count) file(s) | ${totalMB} MB"
+          Write-Host ""
 
       - name: 7. Upload files to VikingFile + Send Telegram result
         shell: pwsh
@@ -28,35 +154,19 @@ on:
           $folder   = "${{ github.event.inputs.viking_folder }}"
           $chatId   = "${{ github.event.inputs.telegram_chat_id }}"
 
-          # ... (your original upload loop stays exactly the same until the end) ...
-
+          Write-Host ""
           Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          Write-Host "  🎉 ALL UPLOADS COMPLETE!"
+          Write-Host "  📤 UPLOADING TO VIKINGFILE"
           Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          Write-Host ""
 
-          if ($uploadedLinks.Count -gt 0) {
-            Write-Host ""
-            Write-Host "  📋 DOWNLOAD LINKS:"
-            foreach ($entry in $uploadedLinks) { Write-Host $entry }
+          $files = Get-ChildItem "downloads" -Recurse -File |
+            Where-Object { $_.Extension -ne ".aria2" }
 
-            # === NEW: Send beautiful message to Telegram ===
-            if ($chatId) {
-              $botToken = "${{ secrets.TELEGRAM_BOT_TOKEN }}"
-              $torrent  = "${{ github.event.inputs.torrent_link }}"
-              $msg = "⚔️ *TORVIKING UPLOAD COMPLETE!*`n`n" +
-                     "📥 Torrent: $torrent`n" +
-                     "📦 Files: $totalFiles | ${totalSizeMB} MB`n`n" +
-                     "🔗 *Download links:*`n" +
-                     ($uploadedLinks -join "`n")
+          $totalFiles  = $files.Count
+          $totalSizeMB = [math]::Round(($files | Measure-Object -Property Length -Sum).Sum / 1MB, 2)
+          Write-Host "  📁 Files: $totalFiles | Total: ${totalSizeMB} MB"
+          Write-Host ""
 
-              Invoke-RestMethod -Uri "https://api.telegram.org/bot$botToken/sendMessage" `
-                -Method Post `
-                -ContentType "application/json" `
-                -Body (ConvertTo-Json @{
-                  chat_id    = $chatId
-                  text       = $msg
-                  parse_mode = "Markdown"
-                })
-              Write-Host "📨 Telegram notification sent"
-            }
-          }
+          $currentFile = 0
+          $uploadedLinks = @
